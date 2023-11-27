@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 // use std::time::Duration;
 
+pub(crate) use dotenv::dotenv;
+
 use serenity::async_trait;
 use serenity::client::{Client, Context, EventHandler};
 use serenity::framework::StandardFramework;
@@ -15,7 +17,6 @@ use serenity::model::prelude::ChannelId;
 use serenity::prelude::*;
 use serenity::Result as SerenityResult;
 
-use songbird::tracks::TrackHandle;
 // use songbird::input;
 use songbird::{
     input::restartable::Restartable,
@@ -25,6 +26,10 @@ use songbird::{
     SerenityInit,
     TrackEvent,
 };
+
+//TODO
+//  Add Pause function and command
+//  Add an unpause
 
 struct Handler;
 
@@ -46,8 +51,12 @@ struct General;
 
 #[tokio::main]
 async fn main() {
+    // Load in all the environment variables in the .env files
+    // Namely the DISCORD_TOKEN api key.
+    dotenv().ok();
     tracing_subscriber::fmt::init();
-    // Configure the client with your Discord bot token in the environment. $Env:DISCORD_TOKEN="MTE1OTU3OTIwNzQxMjc0NDI5Mw.GbVQ2o.9bWmrwg_QMZv-ztNGapSYqpbJMniDwnRR8-L3Q"; cargo run
+    // Configure the client with your Discord bot token in the environment. 
+
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
 
     let intents = GatewayIntents::non_privileged()
@@ -207,9 +216,17 @@ async fn join(ctx: &Context, msg: &Message) -> CommandResult {
 
         let mut handle = handle_lock.lock().await;
 
+        // handle.add_global_event(
+        //     Event::Track(TrackEvent::End),
+        //     TrackEndNotifier {
+        //         chan_id,
+        //         http: send_http,
+        //     },
+        // );
+
         handle.add_global_event(
-            Event::Track(TrackEvent::End),
-            TrackEndNotifier {
+            Event::Track(TrackEvent::Play),
+            TrackPlayNotifier {
                 chan_id,
                 http: send_http,
             },
@@ -248,11 +265,31 @@ impl VoiceEventHandler for TrackEndNotifier {
         if let EventContext::Track(track_list) = ctx {
             check_msg(
                 self.chan_id
-                    .say(&self.http, &format!("Tracks ended: {}.", track_list.len()))
+                    .say(&self.http, &format!("Track ended: {}.", track_list.len()))
                     .await,
             );
         }
 // TODO add a now playing thing here
+        None
+    }
+}
+
+struct TrackPlayNotifier {
+    chan_id: ChannelId,
+    http: Arc<Http>,
+}
+
+#[async_trait]
+impl VoiceEventHandler for TrackPlayNotifier {
+    async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
+        if let EventContext::Track(track_list) = ctx {
+            check_msg(
+                self.chan_id
+                .say(&self.http, &format!("Track Now Playing {:?}.", track_list))
+                .await,
+            )
+        }
+
         None
     }
 }
@@ -395,17 +432,6 @@ async fn play(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
     if let Some(handler_lock) = manager.get(guild_id) {
         let mut handler = handler_lock.lock().await;
 
-
-        // let source = match input::ytdl(&url).await {
-        //     Ok(source) => source,
-        //     Err(why) => {
-        //         println!("Err starting source: {:?}", why);
-        //
-        //         check_msg(msg.channel_id.say(&ctx.http, "Error sourcing ffmpeg").await);
-        //
-        //         return Ok(());
-        //     },
-        // };
         let source = match Restartable::ytdl(url, true).await {
             Ok(source) => source,
             Err(why) => {
@@ -417,35 +443,7 @@ async fn play(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
             },
         };
 
-        // This handler object will allow you to, as needed,
-        // control the audio track via events and further commands.
-        // let song = handler.play_source(source);
         handler.enqueue_source(source.into());
-
-        // let send_http = ctx.http.clone();
-        // let chan_id = msg.channel_id;
-
-        // This shows how to periodically fire an event, in this case to
-        // periodically make a track quieter until it can be no longer heard.
-        // let _ = song.add_event(
-        //     Event::Periodic(Duration::from_secs(5), Some(Duration::from_secs(7))),
-        //     SongFader {
-        //         chan_id,
-        //         http: send_http,
-        //     },
-        // );
-
-        // let send_http = ctx.http.clone();
-
-        // This shows how to fire an event once an audio track completes,
-        // either due to hitting the end of the bytestream or stopped by user code.
-        // let _ = song.add_event(
-        //     Event::Track(TrackEvent::End),
-        //     SongEndNotifier {
-        //         chan_id,
-        //         http: send_http,
-        //     },
-        // );
 
         let queue = handler.queue();
         match queue.len() > 1 {
@@ -462,22 +460,24 @@ async fn play(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
                     msg.channel_id
                         .say(
                             &ctx.http,
-                            format!("Current Queue: {:?}", queue.current().get(TrackHandle)),
+                            format!("Current Queue: {:?}", queue.current()),
                         )
                         .await,
                 );
             }
             false => {
-                    check_msg(
-                        msg.channel_id
-                            .say(
-                                &ctx.http,
-                                "Playing song"
-                            )
-                        .await
-                    );
-                }
+                let tracktitle = queue.current().unwrap().metadata().title.clone().unwrap();
+                check_msg(
+                    msg.channel_id
+                        .say(
+                            &ctx.http,
+                            format!("Playing Song Now: {}", tracktitle
+                            ),
+                        )
+                    .await
+                );
             }
+        }
         } else {
         check_msg(
             msg.channel_id
@@ -488,31 +488,6 @@ async fn play(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
 
     Ok(())
 }
-
-// struct SongFader {
-//     chan_id: ChannelId,
-//     http: Arc<Http>,
-// }
-//
-// #[async_trait]
-// impl VoiceEventHandler for SongFader {
-//     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
-//         if let EventContext::Track(&[(state, track)]) = ctx {
-//             let _ = track.set_volume(state.volume / 2.0);
-//
-//             if state.volume < 1e-2 {
-//                 let _ = track.stop();
-//                 check_msg(self.chan_id.say(&self.http, "Stopping song...").await);
-//                 Some(Event::Cancel)
-//             } else {
-//                 check_msg(self.chan_id.say(&self.http, "Volume reduced.").await);
-//                 None
-//             }
-//         } else {
-//             None
-//         }
-//     }
-// }
 
 struct SongEndNotifier {
     chan_id: ChannelId,
@@ -652,9 +627,9 @@ async fn stop(ctx: &Context, msg: &Message, _args: Args) -> CommandResult {
     if let Some(handler_lock) = manager.get(guild_id) {
         let handler = handler_lock.lock().await;
         let queue = handler.queue();
-        let _ = queue.stop();
 
-        check_msg(msg.channel_id.say(&ctx.http, "Queue cleared.").await);
+        let _ = queue.stop();
+        check_msg(msg.channel_id.say(&ctx.http, format!("Cleared All {} songs from queue.", queue.len())).await);
     } else {
         check_msg(
             msg.channel_id
